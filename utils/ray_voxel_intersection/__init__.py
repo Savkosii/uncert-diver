@@ -43,6 +43,9 @@ class RayVoxelIntersect(Function):
         tns = tns[:, :num_max]
         return intersection,(tns>=0), tns
 
+    """
+    no grad
+    """
     @staticmethod
     def backward(ctx, a, b, c, d, e, f):
         return None, None, None, None, None, None
@@ -79,6 +82,9 @@ class MaskedIntersect(Function):
 
         return intersection,(tns>=0), tns
 
+    """
+    no grad
+    """
     @staticmethod
     def backward(ctx, a, b, c, d, e, f, g, h):
         return None, None, None, None, None, None, None, None

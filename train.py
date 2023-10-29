@@ -216,6 +216,7 @@ if __name__ == '__main__':
     if args.coarse_path is not None and last_ckpt is None: # load occupancy mask from coarse training
         coarse_voxel = Path(args.coarse_path) / 'alpha_map.pt'
         alpha_map = torch.load(coarse_voxel, map_location='cpu')
+        ### !!! update voxel map given the extracted alpha map and threshold
         voxel_mask = alpha_map > hparams.thresh_a
         model.model.voxel_mask.data = voxel_mask
     

@@ -15,6 +15,10 @@ from utils.integrator import integrate, integrate_mlp
     
 class DIVeR(nn.Module):
     def __init__(self, hparams):
+        """
+            voxel_num: voxel grid size
+            voxel_size: size of each voxel
+        """
         super(DIVeR, self).__init__()
         # setup voxel grid parameters
         self.voxel_num = hparams.voxel_num
@@ -29,23 +33,30 @@ class DIVeR(nn.Module):
         self.xyzmin = -N*0.5 # voxel grid boundary
         self.xyzmax = N*0.5 # voxel grid boundary
         
-        # whether to use implicit model
+        # whether to use implicit model (or implicit2explicit)
         if hparams.implicit:
             self.mlp_voxel = ImplicitMLP(hparams.implicit_network_depth, hparams.implicit_channels, hparams.implicit_skips,\
                              self.voxel_dim, hparams.implicit_point_encode)
         else:
-            voxels = torch.randn(*[self.voxel_num+1]*3, self.voxel_dim)*1e-2 # random initialized explicit grid
+            # random initialized explicit grid
+            voxels = torch.randn(*[self.voxel_num+1]*3, self.voxel_dim)*1e-2 
             voxels = nn.Parameter(voxels, requires_grad=True)
             self.register_parameter('voxels',voxels)
             
         if not hparams.fine == 0: # coarse to fine model
             mask_voxel_num = int(self.voxel_num*self.mask_scale)
+            # the default voxel mask (replaced according to the alpha map if 
+            # it has been extracted by prune.py, see main() in train.py)
             self.register_parameter('voxel_mask',nn.Parameter(
                 torch.zeros(mask_voxel_num,mask_voxel_num,mask_voxel_num,dtype=torch.bool),requires_grad=False))
-        
-        # feature -> (density, view_feature)
+
+        ### Input dim: self.voxel_dim (default: 64 or 32)
+        # feature -> (density, view_feature) 
+        # mlp_out: f (64) + sigma (1) + beta^2 (1)
         mlp_dim, mlp_depth, mlp_out = hparams.mlp_point
         self.mlp1 = mlp(self.voxel_dim, [mlp_dim]*mlp_depth, mlp_out)
+        self.beta_relu = nn.Softplus()
+        self.beta_min = 0.01
         
         # (view_feature, viewing dir) -> rgb
         self.view_enc = PositionalEncoding(hparams.dir_encode)
@@ -62,8 +73,8 @@ class DIVeR(nn.Module):
         N = self.voxel_num+1
         
         if evaluate:
-            Z,Y,X = torch.meshgrid(*[torch.arange(0,N)]*3)
-            P = torch.stack([Z,Y,X],dim=-1).float()/(N*0.5)-1.0
+            Z,Y,X = torch.meshgrid(*[torch.arange(0,N)]*3) # (N, N, N) each
+            P = torch.stack([Z,Y,X],dim=-1).float()/(N*0.5)-1.0 # (N, N, N, 3)
 
             voxels = []
             for i in tqdm(range(len(P))):
@@ -84,6 +95,16 @@ class DIVeR(nn.Module):
             ts: BxNxC float tensor of intersection distance
         """
         if hasattr(self, 'voxel_mask'): # with occupancy mask
+            """
+            masked_intersect (no grad)
+            Args:
+                - mask: (Nxmask_scale)**3  occupancy mask
+                - mask_scale: relative scale of the occupancy mask in respect to the voxel grid
+            Return:
+                - BxKx6 intersected entry + exit point
+                - BxK hit indicator
+                - BxK distance from the ray origin
+            """
             coord, mask, ts = masked_intersect(
                 os.contiguous(), ds.contiguous(),
                 self.xyzmin, self.xyzmax, int(self.voxel_num), self.voxel_size,
@@ -92,6 +113,13 @@ class DIVeR(nn.Module):
             coord_in = coord[:,:3]
             coord_out = coord[:,3:]
         else:
+            """
+            ray_voxel_intersect (no grad)
+            Return:
+                - BxKx3 intersected points
+                - BxK hit indicator
+                - BxK distance from the ray origin
+            """
             coord, mask, ts = ray_voxel_intersect(
                 os.contiguous(), ds.contiguous(), 
                 self.xyzmin, self.xyzmax, int(self.voxel_num), self.voxel_size)

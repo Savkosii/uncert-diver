@@ -118,7 +118,7 @@ default_options = {
     'mlp_point': {
         'type': int,
         'nargs': 3,
-        'default': [64,1,65]
+        'default': [64,1,66] # f (64) + sigma (1) + beta (1)
     },
     'mlp_view': {
         'type': int,
