@@ -73,10 +73,12 @@ default_options = {
     
     
     # voxel grid config
+    # canvas size at one dimension
     'grid_size':{
         'type': float,
         'default': 2.8
     },
+    # voxel_size = grid_size / voxel_num
     'voxel_num':{
         'type': int,
         'default': 64
