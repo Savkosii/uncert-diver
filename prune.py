@@ -147,7 +147,7 @@ if __name__ == '__main__':
                         weight, coord, dim=0, out=alpha_map,reduce='max') 
 
                 uncert_map = torch_scatter.scatter(
-                        uncert, coord, dim=0, out=alpha_map,reduce='max') 
+                        uncert, coord, dim=0, out=uncert_map,reduce='max') 
 
         # alpha_map (N, N, N), where N is the number of voxels
         alpha_map = alpha_map.reshape(model.voxel_num,model.voxel_num, model.voxel_num)
