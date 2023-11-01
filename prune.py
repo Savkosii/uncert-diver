@@ -81,11 +81,13 @@ if __name__ == '__main__':
 
 
     alpha_map_path = checkpoint_path / 'alpha_map.pt'
+    uncert_map_path = checkpoint_path / 'uncert_map.pt'
 
     if True: #not alpha_map_path.exists():
         # extracting alpha map
         print('extracting alpha map')
         alpha_map = torch.zeros((model.voxel_num)**3,device=device)
+        uncert_map = torch.zeros((model.voxel_num)**3,device=device)
 
         for batch in tqdm(dataloader):
             rays = batch['rays'].to(device)
@@ -121,8 +123,9 @@ if __name__ == '__main__':
                 # color: (B, K, 3)
                 color, sigma, beta = model.decode(coord_in, coord_out, ds,mask)
                 # weight: (B, K) accumulated alpha
-                _, weight, _ = model.render(color, sigma, beta, mask)
+                _, weight, uncert = model.render(color, sigma, beta, mask)
                 weight = weight[mask] # (B*K)
+                uncert = uncert[mask]
 
                 # accurate voxel corner calculation
                 coord = torch.min((coord_in+1e-4).long(),(coord_out+1e-4).long()) # (B*K, 3)
@@ -132,18 +135,25 @@ if __name__ == '__main__':
                 bound_mask = ((coord>=args.pad) & (coord<=model.voxel_num-1-args.pad)).all(-1)
                 coord = coord[bound_mask] # (B*M)
                 weight = weight[bound_mask] # (B*M)
+                uncert = uncert[bound_mask]
 
                 # flattened occupancy mask index
                 coord = coord[:,0] + coord[:,1]*model.voxel_num + coord[:,2]*(model.voxel_num)**2
                 # (B*M)
 
                 # scatter-max to the occupancy map
-                # input: alpha_map (N*N*N)
+                # alpha_map (N*N*N), where N is the number of voxels
                 alpha_map = torch_scatter.scatter(
                         weight, coord, dim=0, out=alpha_map,reduce='max') 
 
+                uncert_map = torch_scatter.scatter(
+                        uncert, coord, dim=0, out=alpha_map,reduce='max') 
+
+        # alpha_map (N, N, N), where N is the number of voxels
         alpha_map = alpha_map.reshape(model.voxel_num,model.voxel_num, model.voxel_num)
+        uncert_map = uncert_map.reshape(model.voxel_num,model.voxel_num, model.voxel_num)
         torch.save(alpha_map.cpu(), alpha_map_path) # save in the model weight folder
+        torch.save(uncert_map.cpu(), uncert_map_path)
     else:
         print('find existing alpha map')
         print('make sure it is the correctly baked one!')

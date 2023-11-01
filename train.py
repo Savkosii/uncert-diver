@@ -223,21 +223,25 @@ if __name__ == '__main__':
     
     if args.coarse_path is not None and last_ckpt is None: # load occupancy mask from coarse training
         coarse_voxel = Path(args.coarse_path) / 'alpha_map.pt'
-        alpha_map = torch.load(coarse_voxel, map_location='cpu') # (N*N*N), where N is the canvas size
+        alpha_map = torch.load(coarse_voxel, map_location='cpu') # (N, N, N), where N is the number of voxels in corase model
         ### !!! update voxel map given the extracted alpha map and threshold
-        voxel_mask = alpha_map > hparams.thresh_a  # (N*N*N)
+        voxel_mask = alpha_map > hparams.thresh_a  # (N, N, N)
 
+        """
+        TODO: The assumption N_coarse == M_fine is bad. Maybe we can use canvas size as standard like the following?
         ### !!! since the coarse and fine model share the same grid size (canvas size),
         # we can simply use the raw data of old voxels (lower resolution)
         # for the initialization of our new voxels (higher resolution)
-        """
         For example:
         x = torch.tensor([[1, 1], [2, 2], [3, 3]])
         y = torch.tensor([[1, 1, 1], [2, 2, 2]])
         x.data = y
         assert(torch.equal(x, y))
         """
-        model.model.voxel_mask.data = voxel_mask
+        # N of the coarse model == M of the fine model, see configs/
+        # Thus we can assign the voxel mask directly
+        model.model.voxel_mask.data = voxel_mask # (M, M, M) where M is the number of mask voxels == N_coarse
+        # N_coarse = M < N_fine. In the current canvas, mutiple voxels can share one mask voxel.
     
     if args.ft is not None: # intiialize explicit grid from implicit MLP
         ft_state = torch.load(args.ft, map_location='cpu')['state_dict']
