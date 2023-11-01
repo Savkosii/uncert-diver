@@ -97,12 +97,12 @@ if __name__ == '__main__':
             b_max = min(rays.shape[0],(b_id+1)*batch_size)
             x,d = rays[b_min:b_max,:3],rays[b_min:b_max,3:6]
 
-            color, sigma, mask, ts = model(x,d)
+            color, sigma, beta, mask, ts = model(x,d)
             if color is None:
                 rgb = torch.ones(mask.shape[0],3,device=device)
                 depth = torch.zeros(mask.shape[0],device=device)
             else:
-                rgb, weight = model.render(color, sigma, mask)   
+                rgb, weight, uncert = model.render(color, sigma, beta, mask)   
                 depth = (ts*mask*weight).sum(1)
             
             rgbs.append(rgb)

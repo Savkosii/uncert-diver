@@ -99,18 +99,21 @@ class ModelTrainer(pl.LightningModule):
         rgb_h = rgb_h.reshape(-1,3)
         x,d = rays[:,:3],rays[:,3:6]
         
-        color, sigma, mask, _ = self.model(x, d)
+        color, sigma, beta, mask, _ = self.model(x, d)
         
         if color is None: # all the sampled rays missed 
             return None
         
-        rgb, _ = self.model.render(color, sigma, mask)
+        # TODO: uncertainty loss
+        rgb, _, uncert = self.model.render(color, sigma, beta, mask)
         
-        loss_c = NF.mse_loss(rgb, rgb_h) # reconstruction loss
+        # loss_c = NF.mse_loss(rgb, rgb_h) # reconstruction loss
+        loss_c = ((rgb-rgb_h)**2/(2*uncert.unsqueeze(1)**2)).mean()
+        loss_b = 3 + torch.log(uncert).mean() # +3 to make it positive
         loss_reg = self.hparams.l_s*self.sigma_loss(sigma) # sparsity regularization loss
+        loss = loss_c + loss_reg + loss_b
 
-        psnr = -10.0 * math.log10(loss_c.clamp_min(1e-5))
-        loss = loss_c + loss_reg
+        psnr = -10.0 * math.log10(NF.mse_loss(rgb, rgb_h).clamp_min(1e-5))
         
         self.log('train/loss', loss)
         self.log('train/psnr', psnr)
@@ -130,25 +133,29 @@ class ModelTrainer(pl.LightningModule):
         
         batch_size = self.hparams.batch_size*2 # batch size used for rendering
 
-        rgbs,depths = [],[]
+        rgbs,depths,uncerts = [],[],[]
         for b_id in range(math.ceil(rays.shape[0]*1.0/batch_size)):
             x,d = rays[b_id*batch_size:(b_id+1)*batch_size,:3],rays[b_id*batch_size:(b_id+1)*batch_size,3:6]
-            color, sigma, mask, ts = self.model(x,d)
+            color, sigma, beta, mask, ts = self.model(x,d)
             
             if color is None:
                 rgb = torch.ones(mask.shape[0],3,device=mask.device)
                 depth = torch.zeros(mask.shape[0],device=mask.device)
+                uncert = torch.zeros(mask.shape[0],device=mask.device)
             else:
-                rgb, weight = self.model.render(color, sigma, mask)
+                rgb, weight, uncert = self.model.render(color, sigma, beta, mask)
                 rgb = rgb.clamp(0,1)
                 depth = (ts*mask*weight).sum(1)
                 
             rgbs.append(rgb)
             depths.append(depth)
+            uncerts.append(uncert)
             
         rgbs = torch.cat(rgbs,0)
         depths = torch.cat(depths,0)
+        uncerts = torch.cat(uncerts, 0)
         
+
         loss_c = NF.mse_loss(rgbs, rgb_h)
         loss = loss_c
         psnr = -10.0 * math.log10(loss_c.clamp_min(1e-5))
@@ -160,6 +167,7 @@ class ModelTrainer(pl.LightningModule):
         self.logger.experiment.add_image('val/gt_image', rgb_h.reshape(*self.im_shape,3).permute(2, 0, 1), batch_idx)
         self.logger.experiment.add_image('val/inf_image', rgbs.reshape(*self.im_shape,3).permute(2, 0, 1), batch_idx)
         self.logger.experiment.add_image('val/inf_dis', depths.reshape(*self.im_shape,1).permute(2,0,1).expand(3,*self.im_shape), batch_idx)
+        self.logger.experiment.add_image('val/uncert_map', uncerts.reshape(*self.im_shape,1).permute(2,0,1).expand(3,*self.im_shape), batch_idx)
         
         return
 
@@ -215,9 +223,20 @@ if __name__ == '__main__':
     
     if args.coarse_path is not None and last_ckpt is None: # load occupancy mask from coarse training
         coarse_voxel = Path(args.coarse_path) / 'alpha_map.pt'
-        alpha_map = torch.load(coarse_voxel, map_location='cpu')
+        alpha_map = torch.load(coarse_voxel, map_location='cpu') # (N*N*N), where N is the canvas size
         ### !!! update voxel map given the extracted alpha map and threshold
-        voxel_mask = alpha_map > hparams.thresh_a
+        voxel_mask = alpha_map > hparams.thresh_a  # (N*N*N)
+
+        ### !!! since the coarse and fine model share the same grid size (canvas size),
+        # we can simply use the raw data of old voxels (lower resolution)
+        # for the initialization of our new voxels (higher resolution)
+        """
+        For example:
+        x = torch.tensor([[1, 1], [2, 2], [3, 3]])
+        y = torch.tensor([[1, 1, 1], [2, 2, 2]])
+        x.data = y
+        assert(torch.equal(x, y))
+        """
         model.model.voxel_mask.data = voxel_mask
     
     if args.ft is not None: # intiialize explicit grid from implicit MLP

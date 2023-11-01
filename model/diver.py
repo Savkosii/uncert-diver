@@ -15,10 +15,6 @@ from utils.integrator import integrate, integrate_mlp
     
 class DIVeR(nn.Module):
     def __init__(self, hparams):
-        """
-            voxel_num: voxel grid size
-            voxel_size: size of each voxel
-        """
         super(DIVeR, self).__init__()
         # setup voxel grid parameters
         self.voxel_num = hparams.voxel_num
@@ -52,17 +48,16 @@ class DIVeR(nn.Module):
 
         ### Input dim: self.voxel_dim (default: 64 or 32)
         # feature -> (density, view_feature) 
-        # mlp_out: f (64) + sigma (1) + beta^2 (1)
+        # mlp_out: f (64) + sigma (1) + beta (1)
         mlp_dim, mlp_depth, mlp_out = hparams.mlp_point
         self.mlp1 = mlp(self.voxel_dim, [mlp_dim]*mlp_depth, mlp_out)
-        self.beta_relu = nn.Softplus()
-        self.beta_min = 0.01
+        self.beta_min = 0.1
         
         # (view_feature, viewing dir) -> rgb
         self.view_enc = PositionalEncoding(hparams.dir_encode)
         mlp_dim, mlp_depth = hparams.mlp_view
         view_dim = hparams.dir_encode*2*3+3
-        self.mlp2 = mlp(view_dim+mlp_out-1,[mlp_dim]*mlp_depth,3)
+        self.mlp2 = mlp(view_dim+mlp_out-2,[mlp_dim]*mlp_depth,3)
     
     def init_voxels(self, evaluate=True):
         """ initialize explicit voxel grid 
@@ -92,7 +87,7 @@ class DIVeR(nn.Module):
         Return:
             mask: BxN bool tensor of intersection indicator
             features: BxNxC float tensor of integrated features
-            ts: BxNxC float tensor of intersection distance
+            ts: BxNxC float tensor of intersection distance (for depth map)
         """
         if hasattr(self, 'voxel_mask'): # with occupancy mask
             """
@@ -100,10 +95,11 @@ class DIVeR(nn.Module):
             Args:
                 - mask: (Nxmask_scale)**3  occupancy mask
                 - mask_scale: relative scale of the occupancy mask in respect to the voxel grid
+                  1/mask_scale: the number of voxels that share one mask
             Return:
-                - BxKx6 intersected entry + exit point
-                - BxK hit indicator
-                - BxK distance from the ray origin
+                - coord: BxKx6 intersected entry + exit point
+                - mask: BxK hit indicator (used for rendering)
+                - ts: BxK distance from the ray origin
             """
             coord, mask, ts = masked_intersect(
                 os.contiguous(), ds.contiguous(),
@@ -116,9 +112,9 @@ class DIVeR(nn.Module):
             """
             ray_voxel_intersect (no grad)
             Return:
-                - BxKx3 intersected points
-                - BxK hit indicator
-                - BxK distance from the ray origin
+                - coord: BxKx3 intersected points
+                - mask: BxK hit indicator (used for rendering)
+                - ts: BxK distance from the ray origin
             """
             coord, mask, ts = ray_voxel_intersect(
                 os.contiguous(), ds.contiguous(), 
@@ -132,6 +128,17 @@ class DIVeR(nn.Module):
 
         if not mask.any(): # not hit
             return mask, None, None
+
+        """
+        voxels_to_resolve = [0]
+        coord, mask, ts = masked_intersect(
+            os.contiguous(), ds.contiguous(),
+            self.xyzmin, self.xyzmax, int(self.voxel_num), self.voxel_size,
+            mask, self.mask_scale)
+        coord=coord[mask]
+        coord_in = coord[:,:3]
+        coord_out = coord[:,3:]
+        """
             
             
         if hasattr(self,'voxels'): # check whether use explicit or implicit query
@@ -141,6 +148,17 @@ class DIVeR(nn.Module):
 
         return mask, features, ts
     
+    """
+    Args:
+      coord_in: (B*K, 3)
+      coord_out: (B*K, 3)
+      mask: (B, K), where K is the number of hit voxels
+    Return:
+      sigma: (B, K)
+      color: (B, K, 3)
+      beta: (B, K)
+    """
+
     def decode(self, coord_in, coord_out, ds, mask):
         """ get rgb, density given ray entry, exit point """
         if hasattr(self,'voxels'):
@@ -150,7 +168,9 @@ class DIVeR(nn.Module):
             
         B,M = mask.shape
         x = self.mlp1(feature)
-        sigma_,x = x[:,0],x[:,1:]
+        sigma_, beta_, x = x[:,0],x[:,1], x[:,2:]
+        sigma_ = NF.softplus(sigma_)
+        beta_ = NF.softplus(beta_)
 
         x = torch.cat([
             x,
@@ -164,7 +184,9 @@ class DIVeR(nn.Module):
         sigma[mask] = sigma_
         color = torch.zeros(B,M,3,device=mask.device)
         color[mask] = color_
-        return color, sigma
+        beta = torch.zeros(B,M,device=mask.device)
+        beta[mask] = beta_
+        return color, sigma, beta
     
     def forward(self, os, ds):
         """ find the accumulated densities and colors on the voxel grid given corresponding rays
@@ -174,18 +196,21 @@ class DIVeR(nn.Module):
         Return:
             color: BxNx3 float tensor of accumulated colors
             sigma: BxN float tensor of accumulated densities
-            mask: BxN bool tensor of hit indicator
+            mask: BxN bool tensor of hit indicator (used for rendering)
             ts: BxN float tensor of distance to the ray origin
         """
         mask, feature, ts = self.extract_features(os, ds)
         
         B,M = mask.shape
         if feature is None: # all the rays do not hit the volume
-            return None,None,mask,None
+            return None,None,None,mask,None
         
         # feature --> (density, feature)
         x = self.mlp1(feature)
-        sigma_,x = x[:,0],x[:,1:]
+        sigma_, beta_, x= x[:,0],x[:,1],x[:, 2:]
+        # TODO: https://github.com/bmild/nerf/issues/29
+        sigma_ = NF.softplus(sigma_)
+        beta_ = NF.softplus(beta_)
         
 
         # feature --> (feature, pose_enc(direction))
@@ -204,23 +229,25 @@ class DIVeR(nn.Module):
         sigma[mask] = sigma_
         color = torch.zeros(B,M,3,device=mask.device)
         color[mask] = color_
+
+        beta = torch.zeros(B,M,device=mask.device)
+        beta[mask] = beta_
         
-        return color, sigma, mask, ts
+        return color, sigma, beta, mask, ts
         
     
-    def render(self, color, sigma, mask):
+    def render(self, color, sigma, beta, mask):
         """ alpha blending
         Args:
-            color: BxNx3 float tensor of accumulated colors
-            sigma: BxN float tensor of accumulated densities
-            mask: BxN bool tensor of hit indicator
+            color: (B, K, 3) float tensor of accumulated colors
+            sigma: (B, K) float tensor of accumulated densities
+            mask: (B, K) bool tensor of hit indicator
         Return:
-            rgb: Bx3 rendered pixels
-            weight: BxNx3 accumulated alphas
+            rgb: (B, 3) rendered pixels
+            weight: (B, K) accumulated alphas
         """
         
         # alpha = 1-exp(-sigma)
-        sigma = torch.relu(sigma)
         alpha = 1-torch.exp(-sigma*mask)
 
         # 1, 1-alpha1, 1-alpha2, ...
@@ -229,7 +256,11 @@ class DIVeR(nn.Module):
         # color = ac + (1-a)ac + .... 
         weight = alpha * torch.cumprod(alpha_shifted,-1)
         rgb = (weight[:,:,None]*color).sum(1)
+
+        # rendered beta
+        uncert = (weight*beta).sum(1)
+        uncert = uncert + self.beta_min
         
         if self.white_back: # whether to use white background
             rgb = rgb + (1-weight.sum(1,keepdim=True))
-        return rgb, weight
+        return rgb, weight, uncert

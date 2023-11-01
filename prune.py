@@ -96,41 +96,51 @@ if __name__ == '__main__':
 
                 # perform ray-voxel intersection
                 if hasattr(model, 'voxel_mask'):
+                    # coord: (B, K, 6); mask: (B, K), where K is the number of hitted voxel 
                     coord,mask,_ = masked_intersect(xs.contiguous(), ds.contiguous(),\
                                                    model.xyzmin, model.xyzmax, int(model.voxel_num), model.voxel_size,\
                                                    model.voxel_mask.contiguous(), model.mask_scale)
                     if not mask.any():
                         continue
-                    coord=coord[mask]
-                    coord_in = coord[:,:3]
-                    coord_out = coord[:,3:]
+                    # note: bool array indexing only reserve the indexed dimension
+                    coord=coord[mask] # (B*K, 6)  
+                    coord_in = coord[:,:3] # (B*K, 3)
+                    coord_out = coord[:,3:] # (B*K, 3)
                 else:
+                    # coord: (B, K, 3); mask: (B, K), where K is the number of hit points
                     coord, mask, _ = ray_voxel_intersect(xs.contiguous(), ds.contiguous(), model.xyzmin, model.xyzmax, int(model.voxel_num),model.voxel_size)
                     if not mask.any():
                         continue
-                    mask = mask[:,:-1]&mask[:,1:]
-                    coord_in = coord[:,:-1][mask]
-                    coord_out = coord[:,1:][mask]
+                    # only hit both side of the voxel is regarded as hit
+                    mask = mask[:,:-1]&mask[:,1:] # (B, K-1)
+                    # where K-1 is the number of hit voxels
+                    coord_in = coord[:,:-1][mask] # (B*(K-1), 3)
+                    coord_out = coord[:,1:][mask] # (B*(K-1), 3)
 
                 # get accumulated alphas
-                color,sigma = model.decode(coord_in, coord_out, ds,mask)
-                _, weight = model.render(color, sigma, mask)
-                weight = weight[mask]
+                # color: (B, K, 3)
+                color, sigma, beta = model.decode(coord_in, coord_out, ds,mask)
+                # weight: (B, K) accumulated alpha
+                _, weight, _ = model.render(color, sigma, beta, mask)
+                weight = weight[mask] # (B*K)
 
                 # accurate voxel corner calculation
-                coord = torch.min((coord_in+1e-4).long(),(coord_out+1e-4).long())
+                coord = torch.min((coord_in+1e-4).long(),(coord_out+1e-4).long()) # (B*K, 3)
 
                 # check if out of boundary
+                # (B*M)
                 bound_mask = ((coord>=args.pad) & (coord<=model.voxel_num-1-args.pad)).all(-1)
-                coord = coord[bound_mask]
-                weight = weight[bound_mask]
+                coord = coord[bound_mask] # (B*M)
+                weight = weight[bound_mask] # (B*M)
 
                 # flattened occupancy mask index
                 coord = coord[:,0] + coord[:,1]*model.voxel_num + coord[:,2]*(model.voxel_num)**2
+                # (B*M)
 
                 # scatter-max to the occupancy map
+                # input: alpha_map (N*N*N)
                 alpha_map = torch_scatter.scatter(
-                        weight, coord, dim=0, out=alpha_map,reduce='max')
+                        weight, coord, dim=0, out=alpha_map,reduce='max') 
 
         alpha_map = alpha_map.reshape(model.voxel_num,model.voxel_num, model.voxel_num)
         torch.save(alpha_map.cpu(), alpha_map_path) # save in the model weight folder

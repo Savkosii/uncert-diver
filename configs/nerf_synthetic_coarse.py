@@ -29,6 +29,7 @@ default_options = {
         'type': str,
         'default': None
     },
+    # The number of voxels that share one mask are 1/mask_scale
     'mask_scale':{
         'type': float,
         'default': 1.0
@@ -73,16 +74,17 @@ default_options = {
     
     
     # voxel grid config
-    # canvas size at one dimension
+    # canvas size at one dimension, same as the fine model
     'grid_size':{
         'type': float,
         'default': 2.8
     },
-    # voxel_size = grid_size / voxel_num
+    # voxel_size = grid_size / voxel_num, 4x as the fine model
     'voxel_num':{
         'type': int,
         'default': 64
     },
+    # voxel feature dimension
     'voxel_dim':{
         'type': int,
         'default': 32

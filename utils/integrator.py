@@ -4,7 +4,7 @@ def integrate_mlp(voxel_mlp, N, C, coord_i, coord_o):
     """ integrte features along the ray with implicit model
     Args:
         voxel_mlp: implicit voxel grid mlp
-        N: voxel grid size
+        N: the number of voxel + 1
         C: voxel feature dim
         coord_i: Bx3 voxel entry point
         coord_o: Bx3 voxel exit point
@@ -13,10 +13,10 @@ def integrate_mlp(voxel_mlp, N, C, coord_i, coord_o):
     """
 
     # accurate voxel corner calculation
-    pmin = torch.min((coord_i+1e-4).long(),(coord_o+1e-4).long())
+    pmin = torch.min((coord_i+1e-4).long(),(coord_o+1e-4).long()) # (B, 3)
     
     # get eight vertices of voxels
-    xmin,ymin,zmin = pmin.split(1,dim=-1)
+    xmin,ymin,zmin = pmin.split(1,dim=-1) # the xyz of pmin
     xmax,ymax,zmax = (pmin+1).clamp_max(N-1).split(1,dim=-1)
     corners = torch.stack([
         zmin,ymin,xmin, zmin,ymin,xmax,
@@ -63,11 +63,11 @@ def integrate(voxels, coord_i, coord_o):
     """ integrte features along the ray with explicit model
     Args:
         voxels: NxNxNxC dense voxel grid of feature vectors
-        coord_i: Bx3 voxel entry point
-        coord_o: Bx3 voxel exit point
-        mask: BxM bool tensor of missing intersection indicator
+        coord_i: (B*K, 3) voxel entry point
+        coord_o: (B*K, 3) voxel exit point
+        mask: (B*M) bool tensor of missing intersection indicator
     Return:
-        feature: BxC integrated features
+        feature: (B*K, C) integrated features
     """
     N,C = voxels.shape[-2:]
     
