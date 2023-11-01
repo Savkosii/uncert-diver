@@ -46,6 +46,9 @@ class DIVeR(nn.Module):
             self.register_parameter('voxel_mask',nn.Parameter(
                 torch.zeros(mask_voxel_num,mask_voxel_num,mask_voxel_num,dtype=torch.bool),requires_grad=False))
 
+            self.register_parameter('uncert_mask',nn.Parameter(
+                torch.zeros(mask_voxel_num,mask_voxel_num,mask_voxel_num,dtype=torch.bool),requires_grad=False))
+
         ### Input dim: self.voxel_dim (default: 64 or 32)
         # feature -> (density, view_feature) 
         # mlp_out: f (64) + sigma (1) + beta (1)
@@ -108,6 +111,7 @@ class DIVeR(nn.Module):
             coord=coord[mask]
             coord_in = coord[:,:3]
             coord_out = coord[:,3:]
+            # TODO: hack masked_intersect()
         else:
             """
             ray_voxel_intersect (no grad)
@@ -148,19 +152,18 @@ class DIVeR(nn.Module):
 
         return mask, features, ts
     
-    """
-    Args:
-      coord_in: (B*K, 3)
-      coord_out: (B*K, 3)
-      mask: (B, K), where K is the number of hit voxels
-    Return:
-      sigma: (B, K)
-      color: (B, K, 3)
-      beta: (B, K)
-    """
 
     def decode(self, coord_in, coord_out, ds, mask):
-        """ get rgb, density given ray entry, exit point """
+        """ get rgb, density given ray entry, exit point
+        Args:
+          coord_in: (B*K, 3)
+          coord_out: (B*K, 3)
+          mask: (B, K), where K is the number of hit voxels
+        Return:
+          sigma: (B, K)
+          color: (B, K, 3)
+          beta: (B, K)
+        """
         if hasattr(self,'voxels'):
             feature = integrate(self.voxels, coord_in, coord_out)
         else:

@@ -138,6 +138,8 @@ if __name__ == '__main__':
                 uncert = uncert[bound_mask]
 
                 # flattened occupancy mask index
+                # coord: the coordinate of voxel under the voxel basis
+                # coord = (x, y, z), n = x + N * y + N^2 * z
                 coord = coord[:,0] + coord[:,1]*model.voxel_num + coord[:,2]*(model.voxel_num)**2
                 # (B*M)
 

@@ -242,6 +242,12 @@ if __name__ == '__main__':
         # Thus we can assign the voxel mask directly
         model.model.voxel_mask.data = voxel_mask # (M, M, M) where M is the number of mask voxels == N_coarse
         # N_coarse = M < N_fine. In the current canvas, mutiple voxels can share one mask voxel.
+
+        uncert_threshold = 0.5
+        uncert_map_path = Path(args.coarse_path) / 'uncert_map.pt'
+        uncert_map = torch.load(uncert_map_path, map_location='cpu') 
+        uncert_mask = uncert_map <= uncert_threshold  # (N, N, N)
+        model.model.uncert_mask.data = uncert_mask
     
     if args.ft is not None: # intiialize explicit grid from implicit MLP
         ft_state = torch.load(args.ft, map_location='cpu')['state_dict']
