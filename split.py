@@ -39,11 +39,9 @@ if __name__ == '__main__':
     parser.add_argument('--pad' , type=int, default=0) # whether to padd the boundary
     parser.add_argument('--device', type=int, required=False,default=None)
     parser.add_argument('--batch', type=int, default=4000)
-    parser.add_argument('--bias_sampling', type=int, default=0) # whether bias sampling the fine_rays
 
     parser.set_defaults(resume=False)
     args = parser.parse_args()
-
     
     device = torch.device(args.device)
     checkpoint_path = Path(args.checkpoint_path)
@@ -79,13 +77,12 @@ if __name__ == '__main__':
         dataloader = dataset
     
 
-
-    alpha_map_path = checkpoint_path / 'alpha_map.pt'
+    uncert_map_path = checkpoint_path / 'uncert_map.pt'
 
     if True: #not alpha_map_path.exists():
         # extracting alpha map
-        print('extracting alpha map')
-        alpha_map = torch.zeros((model.voxel_num)**3,device=device)
+        print('extracting uncert map')
+        uncert_map = torch.zeros((model.voxel_num)**3,device=device)
 
         for batch in tqdm(dataloader):
             rays = batch['rays'].to(device)
@@ -124,8 +121,8 @@ if __name__ == '__main__':
                 # color: (B, K, 3)
                 color, sigma, beta = model.decode(coord_in, coord_out, ds,mask)
                 # weight: (B, K) accumulated alpha
-                _, weight, _ = model.render(color, sigma, beta, mask)
-                weight = weight[mask] # (B*K)
+                _, _, uncert = model.render(color, sigma, beta, mask)
+                uncert = uncert[mask]
 
                 # accurate voxel corner calculation
                 coord = torch.min((coord_in+1e-4).long(),(coord_out+1e-4).long()) # (B*K, 3)
@@ -134,100 +131,21 @@ if __name__ == '__main__':
                 # (B*M)
                 bound_mask = ((coord>=args.pad) & (coord<=model.voxel_num-1-args.pad)).all(-1)
                 coord = coord[bound_mask] # (B*M)
-                weight = weight[bound_mask] # (B*M)
+                uncert = uncert[bound_mask]
 
                 # flattened occupancy mask index
-                # coord: the coordinate of voxel under the voxel basis (x, y, z)
-                # index = x + N * y + N^2 * z
+                # coord: the coordinate of voxel under the voxel basis
+                # coord = (x, y, z), n = x + N * y + N^2 * z
                 coord = coord[:,0] + coord[:,1]*model.voxel_num + coord[:,2]*(model.voxel_num)**2
                 # (B*M)
 
-                # scatter-max to the occupancy map
-                # alpha_map (N*N*N), where N is the number of voxels
-                alpha_map = torch_scatter.scatter(
-                        weight, coord, dim=0, out=alpha_map,reduce='max') 
+                uncert_map = torch_scatter.scatter(
+                        uncert, coord, dim=0, out=uncert_map,reduce='max') 
 
-
-        # alpha_map (N, N, N), where N is the number of voxels
-        alpha_map = alpha_map.reshape(model.voxel_num,model.voxel_num, model.voxel_num)
-        torch.save(alpha_map.cpu(), alpha_map_path) # save in the model weight folder
-    else:
-        print('find existing alpha map')
-        print('make sure it is the correctly baked one!')
-        alpha_map = torch.load(alpha_map_path, map_location='cpu')
+        # (N, N, N), where N is the number of voxels
+        uncert_map = uncert_map.reshape(model.voxel_num,model.voxel_num, model.voxel_num)
+        torch.save(uncert_map.cpu(), uncert_map_path)
 
         
-    voxel_mask = alpha_map.to(device) > args.thresh
-    print('{} sapce preserved'.format(voxel_mask.float().mean().item()))
-
-    if args.bias_sampling==0: # exit if not bias sampling
-        exit(0)
-    
-          
-    print('extract fine rays')
-    fine_rays = []
-    fine_rgbs = []
-    
-    batch_size *= 10
-    # bias sampling the fine rays 
-    if dataset_name == 'blender': # for nerf-synthetic, we directly store the sampled rays as .npz file in the weight folder
-        dataset_fn = BlenderDataset
-        fine_size = [800,800]
-        dataset = dataset_fn(dataset_path,img_wh=fine_size[::-1], split='train')
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-    
-        for batch in tqdm(dataloader):
-            rays = batch['rays'].to(device)
-            rgbs = batch['rgbs'].to(device)
-
-            xs,ds = rays[:,:3],rays[:,3:6]
-            _,mask,_ = masked_intersect(xs.contiguous(), ds.contiguous(),\
-                                        model.xyzmin, model.xyzmax, int(model.voxel_num), model.voxel_size,\
-                                        voxel_mask.contiguous(), model.mask_scale)
-            valid_rays = mask.any(1)
-
-            if valid_rays.any():
-                fine_rays.append(rays[valid_rays].cpu())
-                fine_rgbs.append(rgbs[valid_rays].cpu())
-
-        fine_rays = torch.cat(fine_rays,0)
-        fine_rgbs = torch.cat(fine_rgbs,0)
-
-        print('{} rays perserved'.format(len(fine_rays)*1.0/len(dataset)))
-
-        fine_path = checkpoint_path / 'fine_rays.npz'
-        np.savez(fine_path, rays=fine_rays, rgbs=fine_rgbs)
-    
-    elif dataset_name == 'tanks': # for tnt, blendedmvs, we store the pixel(ray) mask
-        if 'BlendedMVS' in dataset_path:
-            fine_size = [576,768]
-        elif 'TanksAndTemple' in dataset_path:
-            fine_size = [1080,1920]
-        
-        dataset_fn = TanksDataset
-        dataset = dataset_fn(dataset_path,img_wh=fine_size[::-1], split='extra')
-        dataloader = dataset
-        
-        mask_path = checkpoint_path / 'masks'
-        mask_path.mkdir(parents=True, exist_ok=True)
-        
-        idx = 0
-        for batch in tqdm(dataloader):
-            masks = []
-            rays = batch['rays'].to(device)
-            rgbs = batch['rgbs'].to(device)
-            
-            for b_id in range(math.ceil(len(rays)*1.0/batch_size)):
-                b_min = b_id*batch_size
-                b_max = min((b_id+1)*batch_size,len(rays))
-                xs, ds = rays[b_min:b_max,:3],rays[b_min:b_max,3:6]
-                
-                _,mask,_ = masked_intersect(xs.contiguous(), ds.contiguous(),\
-                                        model.xyzmin, model.xyzmax, int(model.voxel_num), model.voxel_size,\
-                                        voxel_mask.contiguous(), model.mask_scale)
-                mask = mask.any(1)
-                masks.append(mask.cpu())
-            
-            masks = torch.cat(masks,-1).reshape(fine_size).float()
-            save_image(masks, mask_path/'mask_{}.png'.format(idx)) # save in the mask folder inside model weight folder
-            idx += 1
+    uncert_voxel_mask = uncert_map.to(device) > 0.5
+    print('{} voxel to split'.format(uncert_voxel_mask.float().mean().item()))

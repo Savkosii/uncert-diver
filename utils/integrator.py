@@ -65,7 +65,7 @@ def integrate(voxels, coord_i, coord_o):
         voxels: NxNxNxC dense voxel grid of feature vectors
         coord_i: (B*K, 3) voxel entry point
         coord_o: (B*K, 3) voxel exit point
-        mask: (B*M) bool tensor of missing intersection indicator
+        mask: (B*K) bool tensor of missing intersection indicator
     Return:
         feature: (B*K, C) integrated features
     """

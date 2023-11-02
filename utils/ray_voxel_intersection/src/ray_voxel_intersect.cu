@@ -324,8 +324,11 @@ void ray_voxel_intersect_wrapper(
             return;
         }
 
-        // calc the index for mask of voxel
-        // mutiple voxels can share one mask
+        // calc the index for mask of voxel 
+        // Note that mutiple voxels can share one mask
+        // 
+        // The voxel index (i, j, k) = int(corner) since corner is under the voxels basis
+        // Thus int(corner*mask_scale) is the mask voxel index (i, j, k)
         float3 corner = fminf(ori_last+1e-4f,ori+1e-4f)*mask_scale;
         
         int corner_index = int(corner.z)*mask_size*mask_size + int(corner.y)*mask_size + int(corner.x);

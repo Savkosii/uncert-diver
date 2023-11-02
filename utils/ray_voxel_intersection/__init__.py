@@ -27,7 +27,8 @@ class RayVoxelIntersect(Function):
             voxel_num: voxel grid size
             voxel_size: size of each voxel
         Return:
-            - BxKx3 intersected points
+            - BxKx3 intersected points (coord under voxel basis)
+              where K is the max number of hits points in batch
             - BxK hit indicator
             - BxK distance from the ray origin
         """
@@ -65,9 +66,10 @@ class MaskedIntersect(Function):
             mask: (Nxmask_scale)**3  occupancy mask
             mask_scale: relative scale of the occupancy mask in respect to the voxel grid
         Return:
-            - BxKx6 intersected entry + exit point
-            - BxK hit indicator
-            - BxK distance from the ray origin
+            - B, K, 6 intersected entry + exit point (coord under voxel basis), 
+              where K is the max number of hits points in batch
+            - B, K hit indicator
+            - B, K distance from the ray origin
         """
         intersection, intersect_num, tns = _ext.masked_intersect(
             o, v, mask,

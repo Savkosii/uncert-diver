@@ -23,6 +23,8 @@ class DIVeR(nn.Module):
         self.voxel_size = self.grid_size/self.voxel_num
         self.mask_scale = hparams.mask_scale # coarse model occupancy mask is different from the fine model
         self.white_back = hparams.white_back
+
+        self.uncert_mask_scale = 2.0
         
         # assume zero centered voxel grid
         N = self.voxel_num*self.voxel_size
@@ -40,14 +42,19 @@ class DIVeR(nn.Module):
             self.register_parameter('voxels',voxels)
             
         if not hparams.fine == 0: # coarse to fine model
-            mask_voxel_num = int(self.voxel_num*self.mask_scale)
             # the default voxel mask (replaced according to the alpha map if 
             # it has been extracted by prune.py, see main() in train.py)
+            # (N*mask_scale, N*mask_scale, N*mask_scale) = (M, M, M)
+            # = (N_coarse, N_coarse, N_coarse)
+            mask_voxel_num = int(self.voxel_num*self.mask_scale)
             self.register_parameter('voxel_mask',nn.Parameter(
                 torch.zeros(mask_voxel_num,mask_voxel_num,mask_voxel_num,dtype=torch.bool),requires_grad=False))
 
+            # (N_fine*uncert_mask_scale, N_fine*uncert_mask_scale, N_fine*uncert_mask_scale)
+            # loaded in train.py
+            uncert_mask_voxel_num = int(self.voxel_num*self.uncert_mask_scale)
             self.register_parameter('uncert_mask',nn.Parameter(
-                torch.zeros(mask_voxel_num,mask_voxel_num,mask_voxel_num,dtype=torch.bool),requires_grad=False))
+                torch.zeros(uncert_mask_voxel_num,uncert_mask_voxel_num,uncert_mask_voxel_num,dtype=torch.bool),requires_grad=False))
 
         ### Input dim: self.voxel_dim (default: 64 or 32)
         # feature -> (density, view_feature) 
@@ -98,11 +105,12 @@ class DIVeR(nn.Module):
             Args:
                 - mask: (Nxmask_scale)**3  occupancy mask
                 - mask_scale: relative scale of the occupancy mask in respect to the voxel grid
-                  1/mask_scale: the number of voxels that share one mask
+                  1/mask_scale: the number of voxels that share one mask (in one dimension)
             Return:
-                - coord: BxKx6 intersected entry + exit point
-                - mask: BxK hit indicator (used for rendering)
-                - ts: BxK distance from the ray origin
+                - coord: (B, K, 6) intersected entry + exit point (coord under voxel basis)
+                   where K is the max number of hits points in batch
+                - mask: (B, K) hit indicator (used for rendering)
+                - ts: (B, K) distance from the ray origin
             """
             coord, mask, ts = masked_intersect(
                 os.contiguous(), ds.contiguous(),
@@ -111,14 +119,15 @@ class DIVeR(nn.Module):
             coord=coord[mask]
             coord_in = coord[:,:3]
             coord_out = coord[:,3:]
-            # TODO: hack masked_intersect()
+
         else:
             """
             ray_voxel_intersect (no grad)
             Return:
-                - coord: BxKx3 intersected points
-                - mask: BxK hit indicator (used for rendering)
-                - ts: BxK distance from the ray origin
+                - coord: (B, K, 3) intersected points (coord under voxel basis)
+                   where K is the max number of hits points in batch
+                - mask: (B, K) hit indicator (used for rendering and reshaping)
+                - ts: (B, K) distance from the ray origin
             """
             coord, mask, ts = ray_voxel_intersect(
                 os.contiguous(), ds.contiguous(), 
@@ -126,32 +135,55 @@ class DIVeR(nn.Module):
             
             ts = ts[:,:-1]
             coord = coord.clamp_min(0)
-            mask = mask[:,:-1]&mask[:,1:]
-            coord_in = coord[:,:-1][mask]
-            coord_out = coord[:,1:][mask]
+            mask = mask[:,:-1]&mask[:,1:] # hit point2voxel
+            coord_in = coord[:,:-1][mask] # (B*K, 3)
+            coord_out = coord[:,1:][mask] # (B*K, 3)
 
         if not mask.any(): # not hit
             return mask, None, None
 
-        """
-        voxels_to_resolve = [0]
-        coord, mask, ts = masked_intersect(
-            os.contiguous(), ds.contiguous(),
-            self.xyzmin, self.xyzmax, int(self.voxel_num), self.voxel_size,
-            mask, self.mask_scale)
-        coord=coord[mask]
-        coord_in = coord[:,:3]
-        coord_out = coord[:,3:]
-        """
-            
             
         if hasattr(self,'voxels'): # check whether use explicit or implicit query
-            features = integrate(self.voxels, coord_in, coord_out)
+            features = integrate(self.voxels, coord_in, coord_out) # (B*K, C)
+
+            # TODO: hack masked_intersect()
+            finer_coord, finer_mask, finer_ts = masked_intersect(
+                os.contiguous(), ds.contiguous(),
+                self.xyzmin, self.xyzmax, int(self.voxel_num * self.uncert_mask_scale), self.voxel_size / self.uncert_mask_scale, 
+                self.uncert_mask.contiguous(), 1.0)
+            finer_coord=finer_coord[finer_mask]
+            finer_coord_in = finer_coord[:,:3] # (B*K, 3)
+            finer_coord_out = finer_coord[:,3:]
+
+            # Repeat each element along each dimension 
+            uncert_mask_scale = int(self.uncert_mask_scale)
+            finer_voxels = torch.repeat_interleave(self.voxels, uncert_mask_scale, dim=0) 
+            finer_voxels = torch.repeat_interleave(finer_voxels, uncert_mask_scale, dim=1) 
+            finer_voxels = torch.repeat_interleave(finer_voxels, uncert_mask_scale, dim=2)
+            finer_features = integrate(finer_voxels, finer_coord_in, finer_coord_out) # (B*K, C)
+
+            B, K = finer_mask.shape
+            finer_features_map = torch.zeros(B, K)
+            finer_features_map[mask] = finer_features # (B, K, C)
+            finer_features_map = finer_features_map.reshape(B*K, -1)
+
+            # accurate voxel corner calculation
+            coord = torch.min((coord_in+1e-4).long(),(coord_out+1e-4).long()) # (B*K, 3)
+
+            # flattened occupancy mask index
+            # coord: the coordinate of voxel under the voxel basis (x, y, z)
+            # index = x + N * y + N^2 * z
+            coord = coord[:,0] + coord[:,1]*self.voxel_num*2+ coord[:,2]*(self.voxel_num*2)**2
+            # (B*M)
+
+            import torch_scatter
+            # (2N*2N*2N)
+            finer_features_map = torch_scatter.scatter(
+                    finer_features_map, coord, dim=0, out=finer_features_map,reduce='mean') 
         else:
             features = integrate_mlp(self.mlp_voxel, self.voxel_num+1, self.voxel_dim, coord_in, coord_out)
 
         return mask, features, ts
-    
 
     def decode(self, coord_in, coord_out, ds, mask):
         """ get rgb, density given ray entry, exit point
@@ -160,18 +192,17 @@ class DIVeR(nn.Module):
           coord_out: (B*K, 3)
           mask: (B, K), where K is the number of hit voxels
         Return:
-          sigma: (B, K)
-          color: (B, K, 3)
-          beta: (B, K)
+          (B, N, .)
         """
         if hasattr(self,'voxels'):
+            # (B*K, C)
             feature = integrate(self.voxels, coord_in, coord_out)
         else:
             feature = integrate_mlp(self.mlp_voxel, self.voxel_num+1, self.voxel_dim, coord_in, coord_out)
             
         B,M = mask.shape
         x = self.mlp1(feature)
-        sigma_, beta_, x = x[:,0],x[:,1], x[:,2:]
+        sigma_, beta_, x = x[:,0],x[:,1], x[:,2:] # (B*K, .)
         sigma_ = NF.softplus(sigma_)
         beta_ = NF.softplus(beta_)
 
@@ -184,12 +215,12 @@ class DIVeR(nn.Module):
         color_ = torch.sigmoid(color_)
 
         sigma = torch.zeros(B,M,device=mask.device)
-        sigma[mask] = sigma_
+        sigma[mask] = sigma_ # (B, N)
         color = torch.zeros(B,M,3,device=mask.device)
         color[mask] = color_
         beta = torch.zeros(B,M,device=mask.device)
         beta[mask] = beta_
-        return color, sigma, beta
+        return color, sigma, beta # (B, N, .)
     
     def forward(self, os, ds):
         """ find the accumulated densities and colors on the voxel grid given corresponding rays
@@ -198,10 +229,12 @@ class DIVeR(nn.Module):
             ds: Bx3 float tensor of ray direction
         Return:
             color: BxNx3 float tensor of accumulated colors
-            sigma: BxN float tensor of accumulated densities
-            mask: BxN bool tensor of hit indicator (used for rendering)
+            sigma: BxN float tensor of accumulated densities (zero for not hit voxels)
+            mask: BxN bool tensor of hit indicator (used for rendering and reshaping)
             ts: BxN float tensor of distance to the ray origin
         """
+        # mask: (B, K); feature: (B*K, C); ts: (B, K)
+        # where K is the max number of hit voxels in batch
         mask, feature, ts = self.extract_features(os, ds)
         
         B,M = mask.shape
@@ -210,7 +243,7 @@ class DIVeR(nn.Module):
         
         # feature --> (density, feature)
         x = self.mlp1(feature)
-        sigma_, beta_, x= x[:,0],x[:,1],x[:, 2:]
+        sigma_, beta_, x= x[:,0],x[:,1],x[:, 2:] # (B*K, .)
         # TODO: https://github.com/bmild/nerf/issues/29
         sigma_ = NF.softplus(sigma_)
         beta_ = NF.softplus(beta_)
@@ -228,6 +261,7 @@ class DIVeR(nn.Module):
         
         
         # set density and color to be zero for the locations corresponde to miss hits
+        # M = K is the max number of hit voxels in batch
         sigma = torch.zeros(B,M,device=mask.device)
         sigma[mask] = sigma_
         color = torch.zeros(B,M,3,device=mask.device)
@@ -235,8 +269,40 @@ class DIVeR(nn.Module):
 
         beta = torch.zeros(B,M,device=mask.device)
         beta[mask] = beta_
+
+        """TODO"""
+        mask, feature, ts = self.extract_finer_features(os, ds)
+        B,M = mask.shape
+        if feature is None: # all the rays do not hit the volume
+            return None,None,None,mask,None
         
-        return color, sigma, beta, mask, ts
+        # feature --> (density, feature)
+        x = self.mlp1(feature)
+        sigma_, beta_, x= x[:,0],x[:,1],x[:, 2:] # (B*K, .)
+        # TODO: https://github.com/bmild/nerf/issues/29
+        sigma_ = NF.softplus(sigma_)
+        beta_ = NF.softplus(beta_)
+        
+        # feature --> (feature, pose_enc(direction))
+        x = torch.cat([
+            x,
+            self.view_enc(ds[torch.where(mask)[0]])
+        ],dim=-1)
+        
+        # feature --> color
+        color_ = self.mlp2(x)
+        color_ = torch.sigmoid(color_)
+        
+        
+        # set density and color to be zero for the locations corresponde to miss hits
+        # M = K is the max number of hit voxels in batch
+        sigma = torch.zeros(B,M,device=mask.device)
+        sigma[mask] = sigma_
+
+
+        coord = coord[:,0] + coord[:,1]*model.voxel_num + coord[:,2]*(model.voxel_num)**2
+        
+        return color, sigma, beta, mask, ts # (B, K, .)
         
     
     def render(self, color, sigma, beta, mask):

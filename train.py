@@ -243,10 +243,22 @@ if __name__ == '__main__':
         model.model.voxel_mask.data = voxel_mask # (M, M, M) where M is the number of mask voxels == N_coarse
         # N_coarse = M < N_fine. In the current canvas, mutiple voxels can share one mask voxel.
 
+
+    # only split during the training of fine model
+    if args.coarse_path is not None and last_ckpt is not None:
+        uncert_mask_scale = 2
         uncert_threshold = 0.5
         uncert_map_path = Path(args.coarse_path) / 'uncert_map.pt'
         uncert_map = torch.load(uncert_map_path, map_location='cpu') 
-        uncert_mask = uncert_map <= uncert_threshold  # (N, N, N)
+        # keep voxels with high uncertainty for feature recomputation
+        # TODO: filter out the occupancy masked voxels
+        uncert_mask = uncert_map > uncert_threshold  # (N_fine, N_fine, N_fine)
+
+        # Repeat each element along each dimension 
+        uncert_mask = torch.repeat_interleave(uncert_mask, uncert_mask_scale, dim=0) 
+        uncert_mask = torch.repeat_interleave(uncert_mask, uncert_mask_scale, dim=1) 
+        uncert_mask = torch.repeat_interleave(uncert_mask, uncert_mask_scale, dim=2)
+        # (N_fine*uncert_mask_scale, N_fine*uncert_mask_scale, N_fine*uncert_mask_scale)
         model.model.uncert_mask.data = uncert_mask
     
     if args.ft is not None: # intiialize explicit grid from implicit MLP
