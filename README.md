@@ -6,9 +6,9 @@
 ### Uncertainty Estimation
 To esitimate uncertainty, we predict the color of ray segment $c(r(t_i))$ as a Gaussian distribution instead of deterministic point, with variance (uncertainty) $\sigma^2(r(t_i))$ . Following the assumption that the color distribution of different ray segments are i.i.d., the color of rendered ray $c(r)$ is a mixture of Gaussian, with variance $\sum \sigma^2(r(t_i))$. We train the model by maximizing the likelyhood of $c(r)$. 
 
-![uncert_map1](https://pic.imgdb.cn/item/65fb053e9f345e8d038fd593.png)
+![uncert_map1](https://github.com/Savkosii/uncert-diver/blob/master/images/uncert_map1.png)
 
-![uncert_map2](https://pic.imgdb.cn/item/65fb060d9f345e8d03944f5b.png)
+![uncert_map2](https://github.com/Savkosii/uncert-diver/blob/master/images/uncert_map2.png)
 
 ### Uncertainty Attended Rendering
 At the pruning stage of model, we not only prune the voxels with low occupancy, but also highlight the voxels with high uncertainty (above a configurable threshold), which typically covers high frequency details like edges, and 2x the scale of these voxels.
