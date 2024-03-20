@@ -30,7 +30,8 @@ if __name__ == '__main__':
             if 'model.' in k:
                 weight[k.replace('model.', '')] = v
         del state
-        weight['voxel_mask'] = voxel_mask
+        weight['coarse_mask'] = voxel_mask
+        weight['fine_mask'] = torch.zeros_like(voxel_mask)
 
         # find all occupied voxel
         ii,jj,kk = torch.where(voxel_mask)
@@ -52,6 +53,7 @@ if __name__ == '__main__':
             (voxel_num,voxel_num,voxel_num,voxel_dim))
         
         weight['voxels'] = sparse_voxels
+        print(weight['coarse_mask'].shape)
         torch.save(weight, weight_file)
     else:
         weight = torch.load(weight_file, map_location='cpu')

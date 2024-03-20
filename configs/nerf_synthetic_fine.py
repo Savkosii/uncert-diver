@@ -44,6 +44,10 @@ default_options = {
         'type': float,
         'default': 1e-2
     },
+    'thresh_beta':{
+        'type': float,
+        'default': 1e-2
+    },
     
 
     # optimizer config
@@ -118,7 +122,7 @@ default_options = {
     'mlp_point': {
         'type': int,
         'nargs': 3,
-        'default': [64,1,65]
+        'default': [64,1,66] # dim f + sigma + beta = 66
     },
     'mlp_view': {
         'type': int,

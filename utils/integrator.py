@@ -4,7 +4,7 @@ def integrate_mlp(voxel_mlp, N, C, coord_i, coord_o):
     """ integrte features along the ray with implicit model
     Args:
         voxel_mlp: implicit voxel grid mlp
-        N: the number of voxel + 1
+        N: voxel grid size
         C: voxel feature dim
         coord_i: Bx3 voxel entry point
         coord_o: Bx3 voxel exit point
@@ -13,10 +13,10 @@ def integrate_mlp(voxel_mlp, N, C, coord_i, coord_o):
     """
 
     # accurate voxel corner calculation
-    pmin = torch.min((coord_i+1e-4).long(),(coord_o+1e-4).long()) # (B, 3)
+    pmin = torch.min((coord_i+1e-4).long(),(coord_o+1e-4).long())
     
     # get eight vertices of voxels
-    xmin,ymin,zmin = pmin.split(1,dim=-1) # the xyz of pmin
+    xmin,ymin,zmin = pmin.split(1,dim=-1)
     xmax,ymax,zmax = (pmin+1).clamp_max(N-1).split(1,dim=-1)
     corners = torch.stack([
         zmin,ymin,xmin, zmin,ymin,xmax,
@@ -29,7 +29,7 @@ def integrate_mlp(voxel_mlp, N, C, coord_i, coord_o):
     corners_u, corners_rev = corners.unique(dim=0, return_inverse=True)
     
     # query MLP, 2x2x2xBxC features
-    F_u = voxel_mlp(corners_u.float()/(N*0.5)-1.0)
+    F_u = voxel_mlp(corners_u.float()/((N-1)*0.25)-2.0)
     F = F_u[corners_rev].reshape(zmin.shape[0],2,2,2,C).permute(1,2,3,0,4)
     
     # local coordinates of eight vertices
@@ -59,29 +59,34 @@ def integrate_mlp(voxel_mlp, N, C, coord_i, coord_o):
     feature = feature + F[0,0,0]
     return feature
 
-def integrate(voxels, coord_i, coord_o):
+def integrate(vertex_keys, vertex_embedding, coord_i, coord_o):
     """ integrte features along the ray with explicit model
     Args:
         voxels: NxNxNxC dense voxel grid of feature vectors
-        coord_i: (B*K, 3) voxel entry point
-        coord_o: (B*K, 3) voxel exit point
-        mask: (B*K) bool tensor of missing intersection indicator
+        coord_i: Bx3 voxel entry point
+        coord_o: Bx3 voxel exit point
+        mask: BxM bool tensor of missing intersection indicator
     Return:
-        feature: (B*K, C) integrated features
+        feature: BxC integrated features
     """
-    N,C = voxels.shape[-2:]
+    N = vertex_keys.shape[0]
+    C = vertex_embedding.weight.data.shape[-1]
     
     # accurate voxel corner calculation
     pmin = torch.min((coord_i+1e-4).long(),(coord_o+1e-4).long())
     
     # explicit voxel grid query
-    xmin,ymin,zmin = pmin.split(1,dim=-1)
-    xmax,ymax,zmax = (pmin+1).clamp_max(N-1).split(1,dim=-1)
+    zmin,ymin,xmin = pmin.split(1,dim=-1)
+    zmax,ymax,xmax = (pmin+1).clamp_max(N-1).split(1,dim=-1)
     F = torch.stack([
-        voxels[zmin,ymin,xmin],voxels[zmin,ymin,xmax],
-        voxels[zmin,ymax,xmin],voxels[zmin,ymax,xmax],
-        voxels[zmax,ymin,xmin],voxels[zmax,ymin,xmax],
-        voxels[zmax,ymax,xmin],voxels[zmax,ymax,xmax],
+        vertex_embedding(vertex_keys[xmin,ymin,zmin]), 
+        vertex_embedding(vertex_keys[xmin,ymin,zmax]),
+        vertex_embedding(vertex_keys[xmin,ymax,zmin]), 
+        vertex_embedding(vertex_keys[xmin,ymax,zmax]),
+        vertex_embedding(vertex_keys[xmax,ymin,zmin]), 
+        vertex_embedding(vertex_keys[xmax,ymin,zmax]),
+        vertex_embedding(vertex_keys[xmax,ymax,zmin]), 
+        vertex_embedding(vertex_keys[xmax,ymax,zmax]),
     ],0).reshape(2,2,2,-1,C)
 
     # local coordinates of eight vertices

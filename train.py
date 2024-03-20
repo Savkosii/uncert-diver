@@ -103,17 +103,20 @@ class ModelTrainer(pl.LightningModule):
         
         if color is None: # all the sampled rays missed 
             return None
+
         
         # TODO: uncertainty loss
-        rgb, _, uncert = self.model.render(color, sigma, beta, mask)
-        
+        rgb, weight, uncert = self.model.render(color, sigma, beta, mask)
+
         # loss_c = NF.mse_loss(rgb, rgb_h) # reconstruction loss
-        loss_c = ((rgb-rgb_h)**2/(2*uncert.unsqueeze(1)**2)).mean()
-        loss_b = 3 + torch.log(uncert).mean() # +3 to make it positive
+        loss_c = ((rgb-rgb_h)**2/(2*uncert.unsqueeze(1))).mean()
+        loss_b = 3 + 0.5 * torch.log(uncert).mean() # +3 to make it positive
+        # loss_b = 0
         loss_reg = self.hparams.l_s*self.sigma_loss(sigma) # sparsity regularization loss
         loss = loss_c + loss_reg + loss_b
 
         psnr = -10.0 * math.log10(NF.mse_loss(rgb, rgb_h).clamp_min(1e-5))
+
         
         self.log('train/loss', loss)
         self.log('train/psnr', psnr)
@@ -133,7 +136,11 @@ class ModelTrainer(pl.LightningModule):
         
         batch_size = self.hparams.batch_size*2 # batch size used for rendering
 
-        rgbs,depths,uncerts = [],[],[]
+        rgbs,depths,uncerts= [],[],[]
+        highlighted_betas = []
+        N_beta_thresholds = []
+        N_beta_nonzeros = []
+        weight_sums = []
         for b_id in range(math.ceil(rays.shape[0]*1.0/batch_size)):
             x,d = rays[b_id*batch_size:(b_id+1)*batch_size,:3],rays[b_id*batch_size:(b_id+1)*batch_size,3:6]
             color, sigma, beta, mask, ts = self.model(x,d)
@@ -142,35 +149,94 @@ class ModelTrainer(pl.LightningModule):
                 rgb = torch.ones(mask.shape[0],3,device=mask.device)
                 depth = torch.zeros(mask.shape[0],device=mask.device)
                 uncert = torch.zeros(mask.shape[0],device=mask.device)
+
+                N_beta_threshold = torch.zeros(mask.shape[0], device=mask.device)
+                N_beta_nonzero = torch.zeros(mask.shape[0], device=mask.device)
+
+                weight_sum = torch.zeros(mask.shape[0], device=mask.device)
             else:
                 rgb, weight, uncert = self.model.render(color, sigma, beta, mask)
                 rgb = rgb.clamp(0,1)
+                # ts_unique
+                ts = ts[..., 2]
                 depth = (ts*mask*weight).sum(1)
-                
+
+                uncert_highlight_mask = uncert > 0.025
+                if uncert_highlight_mask.any():
+                    beta_highlight_mask = uncert_highlight_mask.unsqueeze(-1).expand(*mask.shape)
+                    highlighted_beta = (beta*weight)[beta_highlight_mask]
+                    highlighted_beta = highlighted_beta[highlighted_beta > 0]
+                    highlighted_betas.append(highlighted_beta)
+
+
+                N_beta_threshold = ((beta*weight) > 0.0135).sum(-1)
+                N_beta_nonzero = ((beta*weight) > 0).sum(-1)
+
+                weight_sum = weight.sum(-1)
+
             rgbs.append(rgb)
             depths.append(depth)
             uncerts.append(uncert)
-            
+
+
+            N_beta_thresholds.append(N_beta_threshold)
+            N_beta_nonzeros.append(N_beta_nonzero)
+
+            weight_sums.append(weight_sum)
+
         rgbs = torch.cat(rgbs,0)
         depths = torch.cat(depths,0)
         uncerts = torch.cat(uncerts, 0)
-        
+
+        N_beta_thresholds = torch.cat(N_beta_thresholds, 0)
+        N_beta_nonzeros = torch.cat(N_beta_nonzeros, 0)
+
+        weight_sums = torch.cat(weight_sums, 0)
+
+        if self.global_step != 0 and highlighted_betas:
+            highlighted_betas = torch.cat(highlighted_betas, 0).detach().cpu().numpy()
+        else:
+            highlighted_betas = torch.tensor([0, 0], dtype=torch.float).detach().cpu().numpy()
+
+
+        # pip install numpy==1.20.1
+        self.logger.experiment.add_histogram('val/highlighted_betas', highlighted_betas, batch_idx + self.global_step)
 
         loss_c = NF.mse_loss(rgbs, rgb_h)
         loss = loss_c
         psnr = -10.0 * math.log10(loss_c.clamp_min(1e-5))
 
-        
+        uncert_highlight_mask = uncerts > 0.025
+        if uncert_highlight_mask.any():
+            N_highlighted_beta_thresholds = N_beta_thresholds[uncert_highlight_mask]
+            print(f"[Validation]: highlighted weighted beta above threshold per highlighted ray: {N_highlighted_beta_thresholds.float().mean()}")
+
+            N_highlighted_beta_nonzeros = N_beta_nonzeros[uncert_highlight_mask]
+            print(f"[Validation]: highlighted weighted beta nonzeros per highlighted ray: {N_highlighted_beta_nonzeros.float().mean()}")
+        if (~uncert_highlight_mask).any():
+            N_nonhighlighted_beta_thresholds = N_beta_thresholds[~uncert_highlight_mask]
+            print(f"[Validation]: nonhighlighted weighted beta above threshold per ray: {N_nonhighlighted_beta_thresholds.float().mean()}")
+            N_nonhighlighted_beta_nonzeros = N_beta_nonzeros[~uncert_highlight_mask]
+            print(f"[Validation]: nonhighlighted weighted beta nonzeros per ray: {N_nonhighlighted_beta_nonzeros.float().mean()}")
+
+
+
         # logging
         self.log('val/loss', loss)
         self.log('val/psnr', psnr)
-        self.logger.experiment.add_image('val/gt_image', rgb_h.reshape(*self.im_shape,3).permute(2, 0, 1), batch_idx)
-        self.logger.experiment.add_image('val/inf_image', rgbs.reshape(*self.im_shape,3).permute(2, 0, 1), batch_idx)
-        self.logger.experiment.add_image('val/inf_dis', depths.reshape(*self.im_shape,1).permute(2,0,1).expand(3,*self.im_shape), batch_idx)
-        self.logger.experiment.add_image('val/uncert_map', uncerts.reshape(*self.im_shape,1).permute(2,0,1).expand(3,*self.im_shape), batch_idx)
-        
-        return
+        self.logger.experiment.add_image('val/gt_image', rgb_h.reshape(*self.im_shape,3).permute(2, 0, 1),  batch_idx)
+        self.logger.experiment.add_image('val/inf_image', rgbs.reshape(*self.im_shape,3).permute(2, 0, 1), batch_idx + self.global_step)
+        self.logger.experiment.add_image('val/inf_dis', depths.reshape(*self.im_shape,1).permute(2,0,1).expand(3,*self.im_shape), batch_idx + self.global_step)
 
+        marked_uncerts = uncerts.clone().detach()
+        if uncert_highlight_mask.any():
+            marked_uncerts[uncert_highlight_mask] = 1
+        uncert_map = torch.sqrt(uncerts).reshape(*self.im_shape,1).expand(*self.im_shape, 3)
+        marked_uncert_map = torch.sqrt(marked_uncerts).reshape(*self.im_shape,1).expand(*self.im_shape, 3)
+        self.logger.experiment.add_image('val/uncert_map', uncert_map.permute(2,0,1), batch_idx + self.global_step)
+        self.logger.experiment.add_image('val/marked_uncert_map', marked_uncert_map.permute(2,0,1), batch_idx + self.global_step)
+
+        return
             
 def add_model_specific_args(parent_parser):
         parser = ArgumentParser(parents=[parent_parser], add_help=False)
@@ -209,6 +275,15 @@ if __name__ == '__main__':
     log_path = Path(args.log_path)
     checkpoint_path.mkdir(parents=True, exist_ok=True)
     
+    checkpoint_callback = [
+        EarlyStopping(
+            monitor="val_f1_score",
+            min_delta=0.01,
+            patience=10,  # NOTE no. val epochs, not train epochs
+            verbose=False,
+            mode="min",
+        ),
+    ]
     checkpoint_callback = ModelCheckpoint(checkpoint_path, monitor='val/loss', save_top_k=1, save_last=True)
     logger = TensorBoardLogger(log_path, name=experiment_name)
 
@@ -220,48 +295,26 @@ if __name__ == '__main__':
     
     # setup model trainer
     model = ModelTrainer(hparams)
-    
-    if args.coarse_path is not None and last_ckpt is None: # load occupancy mask from coarse training
-        coarse_voxel = Path(args.coarse_path) / 'alpha_map.pt'
-        alpha_map = torch.load(coarse_voxel, map_location='cpu') # (N, N, N), where N is the number of voxels in corase model
-        ### !!! update voxel map given the extracted alpha map and threshold
-        voxel_mask = alpha_map > hparams.thresh_a  # (N, N, N)
 
-        """
-        TODO: The assumption N_coarse == M_fine is bad. Maybe we can use canvas size as standard like the following?
-        ### !!! since the coarse and fine model share the same grid size (canvas size),
-        # we can simply use the raw data of old voxels (lower resolution)
-        # for the initialization of our new voxels (higher resolution)
-        For example:
-        x = torch.tensor([[1, 1], [2, 2], [3, 3]])
-        y = torch.tensor([[1, 1, 1], [2, 2, 2]])
-        x.data = y
-        assert(torch.equal(x, y))
-        """
-        # N of the coarse model == M of the fine model, see configs/
-        # Thus we can assign the voxel mask directly
-        model.model.voxel_mask.data = voxel_mask # (M, M, M) where M is the number of mask voxels == N_coarse
-        # N_coarse = M < N_fine. In the current canvas, mutiple voxels can share one mask voxel.
+    if args.coarse_path is not None: # load occupancy mask from coarse training
+        alpha_map_path = Path(args.coarse_path) / 'alpha_map.pt'
+        beta_map_path = Path(args.coarse_path) / 'beta_map.pt'
+        if alpha_map_path.exists() and beta_map_path.exists():
+            alpha_map = torch.load(alpha_map_path, map_location='cpu') 
+            occupancy_mask = alpha_map > hparams.thresh_a 
+            beta_map = torch.load(beta_map_path, map_location='cpu') 
+                                                          
+            uncert_mask = beta_map > 0.0135
+            print('alpha map masks {} voxels'.format(occupancy_mask.float().mean().item()))
+            print('beta map mask {} voxels'.format(uncert_mask.float().mean().item()))
+
+            model.model.coarse_mask.data = occupancy_mask & ~uncert_mask
+            model.model.fine_mask.data = occupancy_mask & uncert_mask
 
 
-    # only split during the training of fine model
-    if args.coarse_path is not None and last_ckpt is not None:
-        uncert_mask_scale = 2
-        uncert_threshold = 0.5
-        uncert_map_path = Path(args.coarse_path) / 'uncert_map.pt'
-        uncert_map = torch.load(uncert_map_path, map_location='cpu') 
-        # keep voxels with high uncertainty for feature recomputation
-        # TODO: filter out the occupancy masked voxels
-        uncert_mask = uncert_map > uncert_threshold  # (N_fine, N_fine, N_fine)
-
-        # Repeat each element along each dimension 
-        uncert_mask = torch.repeat_interleave(uncert_mask, uncert_mask_scale, dim=0) 
-        uncert_mask = torch.repeat_interleave(uncert_mask, uncert_mask_scale, dim=1) 
-        uncert_mask = torch.repeat_interleave(uncert_mask, uncert_mask_scale, dim=2)
-        # (N_fine*uncert_mask_scale, N_fine*uncert_mask_scale, N_fine*uncert_mask_scale)
-        model.model.uncert_mask.data = uncert_mask
-    
     if args.ft is not None: # intiialize explicit grid from implicit MLP
+        alpha_map_path = Path(args.coarse_path) / 'alpha_map.pt'
+        beta_map_path = Path(args.coarse_path) / 'beta_map.pt'
         ft_state = torch.load(args.ft, map_location='cpu')['state_dict']
         ft_weight = {}
         for k,v in ft_state.items():
@@ -269,8 +322,8 @@ if __name__ == '__main__':
                 ft_weight[k.replace('model.','')] = v
         model.model.load_state_dict(ft_weight)
 
-        with torch.no_grad(): # slow, move to gpu?
-            model.model.init_voxels()
+        with torch.no_grad(): 
+            model.model.init_voxels(True, hparams.thresh_a, alpha_map_path, hparams.thresh_beta, beta_map_path)
     
     trainer = Trainer.from_argparse_args(
         args,

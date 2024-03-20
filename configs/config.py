@@ -3,42 +3,42 @@ default_options = {
     'im_shape':{
         'type': int,
         'nargs': 2,
-        'default': [image_height,image_width]
+        'default': [800,800]
     },
     'batch_size':{
         'type': int,
-        'default': batch_size
+        'default': 1024*8
     },
     'dataset': {
         'type': str,
         'nargs': 2,
-        'default': [{'blender', 'tanks'}, '{DATASET_PATH}/{SCENE}']
+        'default': ['blender','nerf_synthetic/drums']
     },
     'num_workers': {
         'type': int,
-        'default': dataloader_worker_thread_num
+        'default': 6
     },
 
 
     # coarse to fine config
     'fine':{
         'type': int,
-        'default': {0,1} # 0 for coarse stage 1 for fine stage
+        'default': 1
     },
     'coarse_path':{
         'type': str,
-        'default': '{CHECKPOINT_FOLDER}'
+        'default': 'checkpoints/drums_coarse'
     },
     'mask_scale':{
         'type': float,
-        'default': releative_scale_to_voxel_grid
+        'default': 0.25
     },
     
     
     # training strategy config
     'implicit':{
         'type': bool,
-        'default': whehter_to_use_implicit_model
+        'default': True
     },
     'thresh_a':{
         'type': float,
@@ -54,7 +54,7 @@ default_options = {
     },
     'learning_rate': {
         'type': float,
-        'default': learning_rate
+        'default': 5e-4
     },
     'weight_decay': {
         'type': float,
@@ -79,7 +79,7 @@ default_options = {
     },
     'voxel_num':{
         'type': int,
-        'default': number_of_voxels_along_each_axis
+        'default': 256
     },
     'voxel_dim':{
         'type': int,
@@ -118,12 +118,12 @@ default_options = {
     'mlp_point': {
         'type': int,
         'nargs': 3,
-        'default': [hidden_dimension,network_depth,output_dimension]
+        'default': [32,2,34] # dim f + sigma + beta = 34
     },
     'mlp_view': {
         'type': int,
         'nargs': 2,
-        'default': [hidden_dimension,network_depth]
+        'default': [32,1]
     },
     'dir_encode':{
         'type': int,
@@ -134,6 +134,6 @@ default_options = {
     # rendering config
     'white_back': {
         'type': bool,
-        'default': True # if background color is white.
+        'default': True
     }
 }

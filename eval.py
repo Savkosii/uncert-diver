@@ -39,15 +39,18 @@ if __name__ == '__main__':
     
     device = torch.device(args.device)
     
+    alpha_map_path = Path(args.coarse_path) / 'alpha_map.pt'
+    beta_map_path = Path(args.coarse_path) / 'beta_map.pt'
     checkpoint_path = Path(args.checkpoint_path)
     # load model
     if args.checkpoint_path[-4:] == '.pth': # model weight file
         hparams.mask_scale = 1 # assume the occupancy mask is at fine scale
         weight = torch.load(checkpoint_path,map_location='cpu')
-        weight['voxels'] = weight['voxels'].to_dense()
+        weight['coarse_vertex_keys'] = weight['coarse_vertex_keys'].to_dense()
+        weight['fine_vertex_keys'] = weight['fine_vertex_keys'].to_dense()
         model = DIVeR(hparams)
         with torch.no_grad():
-            model.init_voxels(False)
+            model.init_voxels(True, hparams.thresh_a, alpha_map_path, hparams.thresh_beta,beta_map_path)
 
         model.load_state_dict(weight,strict=False)
     else: # model checkpoint point file
@@ -60,7 +63,8 @@ if __name__ == '__main__':
         model = DIVeR(hparams)
         if hparams.implicit:
             with torch.no_grad():
-                model.init_voxels(False)
+                pass
+                # model.init_voxels(True)
 
         model.load_state_dict(weight, strict=True)
 
@@ -103,6 +107,7 @@ if __name__ == '__main__':
                 depth = torch.zeros(mask.shape[0],device=device)
             else:
                 rgb, weight, uncert = model.render(color, sigma, beta, mask)   
+                ts = ts[..., 2]
                 depth = (ts*mask*weight).sum(1)
             
             rgbs.append(rgb)
