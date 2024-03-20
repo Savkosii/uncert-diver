@@ -18,7 +18,7 @@ Following vanilla Diver, we compute the voxel feature of ray as the concatenatio
 ## Result
 Our method does not introduce much overhead since we only highlight nearly 0.1~0.6% voxels among the whole scene, but achieve a decent improvement over the vaniall Diver on more challenging (i.e., model gain relatively lower PSNR) dataset.
 
-![result](https://pic.imgdb.cn/item/65faec129f345e8d03eb5ccf.png)
+![result](https://github.com/Savkosii/uncert-diver/blob/master/images/result.png)
 
 ## Reproduce
 See the configuartion and training procedure of [DiVeR](https://github.com/lwwu2/diver)
